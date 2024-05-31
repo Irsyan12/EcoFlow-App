@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:ecoflow/historyAngkat.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'firestore_service.dart';
 import 'package:flutter/material.dart';
 import 'notifikasi.dart';
@@ -25,6 +26,21 @@ class _MainScreenState extends State<MainScreen> {
     super.initState();
     // Panggil fungsi untuk memeriksa koneksi Firebase saat widget diinisialisasi
     _checkFirebaseConnection();
+    _requestNotificationPermission();
+  }
+
+  Future<void> _requestNotificationPermission() async {
+    PermissionStatus status = await Permission.notification.status;
+    if (!status.isGranted) {
+      status = await Permission.notification.request();
+      if (status.isGranted) {
+        print("Notification permission granted");
+      } else if (status.isDenied) {
+        print("Notification permission denied");
+      } else if (status.isPermanentlyDenied) {
+        openAppSettings();
+      }
+    }
   }
 
   Future<void> _checkFirebaseConnection() async {
@@ -103,12 +119,13 @@ class _MainScreenState extends State<MainScreen> {
                         ),
                       ],
                     ),
-              SizedBox(height: 20.0),
+              SizedBox(height: 12.0),
               HeaderContent(),
               BarStatusSampah(),
               TampungSampahSekarang(),
               RiwayatAngkat(),
               Riwayat(),
+              SizedBox(height: 10.0),
             ],
           ),
         ),
@@ -213,6 +230,8 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
   final databaseReference = FirebaseDatabase.instance.ref('status_sampah');
   double statusPenampungan = 0.0;
   double statusJaring = 0.0;
+  bool _isNotificationSent = false;
+  Timer? _debounce;
 
   @override
   void initState() {
@@ -227,6 +246,7 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
         databaseURL:
             'https://ecoflow-11-7-default-rtdb.asia-southeast1.firebasedatabase.app/');
     databaseReference.keepSynced(true);
+
     DatabaseReference ref =
         rtdb.ref().child('status_sampah').child('status_jaring');
     Stream<DatabaseEvent> stream = ref.onValue;
@@ -235,37 +255,79 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
       if (snapshot.value != null) {
         setState(() {
           statusJaring = double.parse(snapshot.value.toString());
-          print('status penampungan: $statusPenampungan');
         });
       }
     });
-
-    // -----------------
 
     DatabaseReference ref2 =
         rtdb.ref().child('status_sampah').child('status_penampungan');
     Stream<DatabaseEvent> stream2 = ref2.onValue;
     stream2.listen((DatabaseEvent event) {
       var snapshot = event.snapshot;
-
-      // print('Jenis Event: ${event.type}');
-      // print('Snapshot: ${event.snapshot}');
       if (snapshot.value != null) {
-        setState(() {
-          statusPenampungan = double.parse(snapshot.value.toString());
-          print('status penampungan: $statusPenampungan');
+        if (_debounce?.isActive ?? false) _debounce?.cancel();
+        _debounce = Timer(const Duration(seconds: 2), () {
+          setState(() {
+            statusPenampungan = double.parse(snapshot.value.toString());
+            checkPenampunganStatus();
+          });
         });
       }
     });
   }
 
+  void checkPenampunganStatus() async {
+    double maxLoad = 4.0;
+    double warningLoad = 3.0;
+    bool shouldSendNotification = false;
+    String title = '';
+    String description = '';
+    String level = '';
+
+    if (statusPenampungan >= maxLoad && !_isNotificationSent) {
+      shouldSendNotification = true;
+      title = 'Penampungan Sampah Penuh';
+      description = 'Penampungan sampah telah mencapai kapasitas maksimal.';
+      level = 'danger';
+    } else if (statusPenampungan >= warningLoad &&
+        statusPenampungan < maxLoad &&
+        !_isNotificationSent) {
+      shouldSendNotification = true;
+      title = 'Penampungan Sampah Hampir Penuh';
+      description =
+          'Penampungan sampah hampir mencapai kapasitas maksimal. Segera kosongkan penampungan sampah.';
+      level = 'warning';
+    }
+
+    if (shouldSendNotification) {
+      _isNotificationSent = true;
+      QuerySnapshot existingNotifications = await FirebaseFirestore.instance
+          .collection('notifikasi')
+          .where('judul', isEqualTo: title)
+          .get();
+
+      if (existingNotifications.docs.isEmpty) {
+        await FirebaseFirestore.instance.collection('notifikasi').add({
+          'judul': title,
+          'deskripsi': description,
+          'level': level,
+          'waktu': Timestamp.now(),
+        });
+      }
+    } else if (statusPenampungan < warningLoad) {
+      _isNotificationSent = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Menyesuaikan tampilan berdasarkan nilai statusSampah
     double maxLoad = 4.0;
     double value = (statusPenampungan / maxLoad) * 100;
 
     double maxCapacity = 1.8;
+    if (statusJaring > 1.8) {
+      statusJaring = 1.8;
+    }
     double valueCapacity = (statusJaring / maxCapacity) * 100;
 
     return Card(
@@ -289,44 +351,6 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
               ),
             ),
             const SizedBox(height: 6.0),
-            StreamBuilder(
-              stream: databaseReference.child('status_sampah').onValue,
-              builder: (BuildContext context, AsyncSnapshot snapshot) {
-                if (snapshot.hasData && snapshot.data!.snapshot.value != null) {
-                  var statusPenampungan = snapshot.data!.snapshot.value;
-                  return Column(
-                    children: [
-                      Expanded(
-                        flex: 3,
-                        child: LinearProgressIndicator(
-                          value: value / 100,
-                          backgroundColor: const Color(0xFFD9D9D9),
-                          minHeight: 7.0,
-                          borderRadius: BorderRadius.circular(4.0),
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            getValueColor(value),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8.0),
-                      Expanded(
-                        flex: 1,
-                        child: Text(
-                          '${statusPenampungan.toStringAsFixed(0)} Kg / 4 Kg',
-                          style: const TextStyle(
-                            fontSize: 11.0,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black45,
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                } else {
-                  return SizedBox(); // Jika tidak ada data, kembalikan widget kosong
-                }
-              },
-            ),
             Row(
               children: [
                 Expanded(
@@ -335,7 +359,6 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
                     value: value / 100,
                     backgroundColor: const Color(0xFFD9D9D9),
                     minHeight: 7.0,
-                    borderRadius: BorderRadius.circular(4.0),
                     valueColor: AlwaysStoppedAnimation<Color>(
                       getValueColor(value),
                     ),
@@ -373,7 +396,6 @@ class _BarStatusSampahState extends State<BarStatusSampah> {
                     value: valueCapacity / 100,
                     minHeight: 7.0,
                     backgroundColor: const Color(0xFFD9D9D9),
-                    borderRadius: BorderRadius.circular(4.0),
                     valueColor: AlwaysStoppedAnimation<Color>(
                       getValueColor(valueCapacity, isCapacity: true),
                     ),
@@ -460,13 +482,25 @@ class _TampungSampahSekarangState extends State<TampungSampahSekarang> {
           (statusPenampunganSesudah - statusPenampunganSebelum)
               .toStringAsFixed(1));
 
+      // Show success dialog
+      DInfo.dialogSuccess(
+          context, 'Sampah berhasil diangkat!\nHistori akan disimpan...');
+      DInfo.closeDialog(context,
+          durationBeforeClose: const Duration(seconds: 2));
+
+      // Wait for 10 seconds before saving to Firestore
+      await Future.delayed(Duration(seconds: 10));
+
       // Save lifting status and timestamp to Firestore
       await _saveToFirestore(beratSampah);
 
-      // Show success dialog
-      DInfo.dialogSuccess(context, 'Sampah berhasil diangkat!');
-      DInfo.closeDialog(context,
-          durationBeforeClose: const Duration(seconds: 2));
+      // Show success snackbar
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Histori berhasil disimpan'),
+          duration: Duration(seconds: 3),
+        ),
+      );
 
       // Setelah proses pengangkatan sampah selesai
       widget.onLiftingCompleted?.call();
